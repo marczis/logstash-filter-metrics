@@ -139,6 +139,7 @@ class LogStash::Filters::Metrics < LogStash::Filters::Base
 
   # The percentiles that should be measured
   config :percentiles, :validate => :array, :default => [1, 5, 10, 90, 95, 99, 100]
+  config :one_event_per_meter, :validate => :boolean, :default => false
 
   def register
     require "metriks"
@@ -182,26 +183,41 @@ class LogStash::Filters::Metrics < LogStash::Filters::Base
     # Do nothing if there's nothing to do ;)
     return unless should_flush?
 
-    event = LogStash::Event.new
-    event["message"] = Socket.gethostname
-    @metric_meters.each_pair do |name, metric|
-      flush_rates event, name, metric
-      metric.clear if should_clear?
-    end
+    events = Array.new()
+    if @one_event_per_meter
+	#puts "===> Entering to wonderland."
+	@metric_meters.each_pair do |name, metric|
+	    #puts "----> Creating new event #{name} = #{metric}"
+	    event = LogStash::Event.new
+	    event["meter"]   = name
+	    flush_rates event, name, metric
+	    events.push(event)
+	    #puts event
+	end
+	#puts "===> Leavin wonderland."
+	#puts
+	#TODO add timers, in case we need them
+    else
+	event = LogStash::Event.new
+	@metric_meters.each_pair do |name, metric|
+	    flush_rates event, name, metric
+	    metric.clear if should_clear?
+	end
 
-    @metric_timers.each_pair do |name, metric|
-      flush_rates event, name, metric
-      # These 4 values are not sliding, so they probably are not useful.
-      event["#{name}.min"] = metric.min
-      event["#{name}.max"] = metric.max
-      # timer's stddev currently returns variance, fix it.
-      event["#{name}.stddev"] = metric.stddev ** 0.5
-      event["#{name}.mean"] = metric.mean
-
-      @percentiles.each do |percentile|
-        event["#{name}.p#{percentile}"] = metric.snapshot.value(percentile / 100.0)
-      end
-      metric.clear if should_clear?
+	@metric_timers.each_pair do |name, metric|
+	    flush_rates event, name, metric
+	    # These 4 values are not sliding, so they probably are not useful.
+	    event["#{name}.min"] = metric.min
+	    event["#{name}.max"] = metric.max
+	    # timer's stddev currently returns variance, fix it.
+	    event["#{name}.stddev"] = metric.stddev ** 0.5
+	    event["#{name}.mean"] = metric.mean
+	    @percentiles.each do |percentile|
+		event["#{name}.p#{percentile}"] = metric.snapshot.value(percentile / 100.0)
+	    end
+	    metric.clear if should_clear?
+	end
+	events.push(event)
     end
 
     # Reset counter since metrics were flushed
@@ -214,8 +230,11 @@ class LogStash::Filters::Metrics < LogStash::Filters::Base
       @metric_timers.clear
     end
 
-    filter_matched(event)
-    return [event]
+    #As we can match only one event, let's match on the last one, not used anyway I think
+    events.each do |event|
+	filter_matched(event)
+    end
+    return events
   end
 
   # this is a temporary fix to enable periodic flushes without using the plugin config:
